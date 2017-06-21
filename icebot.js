@@ -245,6 +245,13 @@ function fixChannelPositions(attempts) {
     });
 }
 
+// Given the ID of a user, fetch their member role
+function memberRoleOfUser(userID, server) {
+    for (let r of bot.servers[server].members[userID].roles) {
+        if (configurables.memberRoleLookup[r] != undefined) return r;
+    }
+}
+
 // Save the current configurables object to a file
 function saveConfigurables() {
     fs.writeFile("configurablesreloaded.txt", JSON.stringify(configurables, null, 4), {encoding: "utf8"}, function() {});
@@ -288,8 +295,10 @@ function sendEmbedMessage(channelID, title, message, type, attempts) {
 // Send a message to a channel. Retries automatically if it fails.
 // The attempts option should not be specified when calling this function outside of this function.
 function sendMessage(channelID, message, attempts) {
-    if (message == undefined) return;
-    if (typeof(message) == "object") message = JSON.stringify(message);
+    if (message == undefined) message = "The message was `undefined`. This was probably not supposed to happen.";
+    if (typeof(message) == "object") message = JSON.stringify(message); // Convert some incompatible data types to strings
+    if (typeof(message) == "number") message = message+"";
+    if (typeof(message) == "boolean") message = (message ? "true" : "false");
     if (!attempts) attempts = 0; // Set attempts if it was not set
     bot.sendMessage({to: channelID, message: message}, function(err) {
         if (err) { // If an error occurred
@@ -321,6 +330,14 @@ function userIDToNick(userID, serverID) {
 }
 
 /// === BOT FUNCTIONS ===
+
+function botEval(userID, channelID, command) {
+    if (configurables.botAdmins.indexOf(userID) != -1 || matchingElementFromArray(bot.servers[bot.channels[channelID].guild_id].members[userID].roles, configurables.roleHierarchy["ADMIN"]).length > 0) {
+        sendMessage(channelID, eval(command));
+    } else {
+        sendMessage(channelID, "You don't have sufficient permissions to eval anything. Add your userID to `configurables.botAdmins` or obtain an admin role.");
+    }
+}
 
 function friendlyChannelCreation(name, type, channelID) {
     if (!type || !name) {
@@ -524,7 +541,7 @@ bot.on("message", function(user, userID, channelID, message, event) {
     if (message.charAt(0) == "/") {
         switch(message.split(" ")[0].toLowerCase()) { // Run code block based on first word of message
         case "/eval": // Run the message as a JS command
-            sendMessage(channelID, eval(message.split(" ").slice(1).join(" ")));
+            botEval(userID, channelID, message.split(" ").slice(1).join(" "));
             break;
         case "/help": // Send the list of bot commands
             sendMessage(channelID, "Welcome to "+bot.username+"! Commands are prefixed with a `/`.\nHere's the list of common commands: /help, /rank\nHere's the list of less useful commands: /eval, /roleid");
