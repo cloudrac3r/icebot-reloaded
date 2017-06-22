@@ -6,17 +6,18 @@ let fs = require("fs");
 
 /// === GLOBALS ===
 let channelIndex = [];
+const messagePrefixes = {0: "[!]", 1: "[:]", 2: "[ ]"};
 
 // Read the bot token from a file
 let token = fs.readFileSync("token.txt", {encoding: "utf8"}).split("\n")[0];
 
 // Load configurables from a file
 let configurables = JSON.parse(fs.readFileSync("configurablesreloaded.txt", {encoding: "utf8"}));
-log("Loaded configurables", 1);
+log("Loaded configurables", 2);
 
 // Load XP from a file
 let xp = JSON.parse(fs.readFileSync("xpreloaded.txt", {encoding: "utf8"}).slice(9));
-log("Loaded XP data", 1);
+log("Loaded XP data", 2);
 
 // Create the bot
 let bot = new Discord.Client({
@@ -75,7 +76,9 @@ function isAbove(r1, r2) {
 // Log a message to console with regards to the logLevel (severity)
 // Levels: 0 (critical) 1 (good to know) 2 (everything)
 function log(message, level) {
-    if (level <= configurables.logLevel) console.log(message);
+    let prefix = messagePrefixes[level];
+    if (!prefix) prefix = "[?]";
+    if (level <= configurables.logLevel) console.log(prefix+" "+message);
 }
 
 // Convert a string to a text-channel-friendly form.
@@ -164,7 +167,7 @@ function createChannel(name, type, server, callback, attempts) {
             // Retry (or not)
             if (attempts >= configurables.maxAttempts) {
                 toLog += "Will not retry.";
-                callback(true);
+                if (callback) callback(true);
             } else {
                 toLog += "Will retry in "+configurables.retryTimeout+"ms.";
                 setTimeout(function() {
@@ -180,7 +183,7 @@ function createChannel(name, type, server, callback, attempts) {
 }
 
 // Creates the channel index and sets channel positions correctly.
-function createIndex() {
+function createIndex(server) {
     let t = Date.now(); // Time how long it took
     channelIndex.length = 0; // Clear the channelIndex array
     let highest = 0;
@@ -198,6 +201,65 @@ function createIndex() {
     fixChannelPositions(); // Send a request to Discord
 }
 
+// Delete a channel.
+function deleteChannel(channelID, callback, attempts) {
+    if (!channelID) {
+        if (callback) callback(true);
+        return;
+    }
+    if (!attempts) attempts = 0; // Set attempts if it was not set
+    bot.deleteChannel(channelID, function(err, res) {
+        if (err) {
+            attempts++;
+            let toLog = "An error occurred while deleting a channel (attempt "+attempts+")!\nchannelID: "+channelID+", Error: "+err+"\n";
+            // Retry (or not)
+            if (attempts >= configurables.maxAttempts) {
+                toLog += "Will not retry.";
+                if (callback) callback(true);
+            } else {
+                toLog += "Will retry in "+configurables.retryTimeout+"ms.";
+                setTimeout(function() {
+                    deleteChannel(channelID, callback, attempts);
+                }, configurables.retryTimeout);
+            }
+            log(toLog, 1);
+        } else {
+            log("Deleted a channel with ID: "+channelID);
+            if (callback) callback(false);
+        }
+    });
+}
+
+// Edits the permissions of a voice or text channels for a single group.
+function editChannelPermissions(channelID, groupID, permissions, attempts) {
+    if (!attempts) attempts = 0; // Set attempts if it was not set
+    let object = permissions;
+    object.channelID = channelID;
+    if (bot.users[groupID] == undefined) {
+        object.roleID = groupID;
+    } else {
+        object.userID = groupID;
+    }
+    bot.editChannelPermissions(object, function(err) {
+        if (err) { // If an error occurred
+            attempts++;
+            let toLog = "An error occurred while editing single-group channel permissions (attempt "+attempts+")!\nchannelID: "+channelID+", groupID: "+groupID+"\nError: "+err+"\n";
+            // Retry (or not)
+            if (attempts >= configurables.maxAttempts) {
+                toLog += "Will not retry.";
+            } else {
+                toLog += "Will retry in "+configurables.retryTimeout+"ms.";
+                setTimeout(function() {
+                    editChannelPermissions(channelID, groupID, permissions, attempts);
+                }, configurables.retryTimeout);
+            }
+            log(toLog, 1);
+        } else { // If there was no error
+            log("Edited single-group permissions of "+channelID, 2);
+        }
+    });
+}
+
 // Given a role name, fetches its ID. Returns undefined if name couldn't be matched. 
 function getRoleID(name, server) {
     for (let r in bot.servers[server].roles) { // Loop through every role on the server
@@ -208,7 +270,7 @@ function getRoleID(name, server) {
 }
 
 // Set the position values of every channel
-function fixChannelPositions(attempts) {
+function fixChannelPositions(server, attempts) {
     if (!attempts) attempts = 0;
     let body = []; // What to send
     for (let i = 0; i < channelIndex.length; i++) { // Add every channel which needs to move
@@ -235,7 +297,7 @@ function fixChannelPositions(attempts) {
             } else {
                 toLog += "Will retry in "+configurables.retryTimeout+"ms.";
                 setTimeout(function() {
-                    fixChannelPositions(attempts);
+                    fixChannelPositions(configurables.server, attempts);
                 }, configurables.retryTimeout);
             }
             log(toLog, 1);
@@ -250,6 +312,7 @@ function memberRoleOfUser(userID, server) {
     for (let r of bot.servers[server].members[userID].roles) {
         if (configurables.memberRoleLookup[r] != undefined) return r;
     }
+    return null;
 }
 
 // Save the current configurables object to a file
@@ -287,7 +350,11 @@ function sendEmbedMessage(channelID, title, message, type, attempts) {
             }
             log(toLog, 1);
         } else { // If there was no error
-            log("Sent a message to "+channelID+": "+message, 2);
+            if (title == "multifield") {
+                log("Sent a multifield embed message to "+channelID, 2);
+            } else {
+                log("Sent an embed message to "+channelID+": "+title+" // "+message, 2);
+            }
         }
     });
 }
@@ -320,6 +387,16 @@ function sendMessage(channelID, message, attempts) {
     });
 }
 
+// Set the permissions of a voice or text channel for multiple groups at once.
+function setChannelPermissions(channelID, permissions) {
+    let count = 0;
+    for (let r in permissions) {
+        editChannelPermissions(channelID, r, permissions[r]);
+        count++;
+    }
+    log("Setting multi-group permissions ("+count+" groups) for channel "+channelID, 2);
+}
+
 // Given a userID, return the username or nickname.
 function userIDToNick(userID, serverID) {
     if (serverID) { // If a server was specified...
@@ -339,26 +416,37 @@ function botEval(userID, channelID, command) {
     }
 }
 
-function friendlyChannelCreation(name, type, channelID) {
-    if (!type || !name) {
+function friendlyChannelCreation(name, type, userID, channelID) {
+    if (!memberRoleOfUser(userID, bot.channels[channelID].guild_id)) { // Prevent member role errors
+        sendMessage(channelID, "You don't have a Clan Member role, so you aren't permitted to create voice channels.");
+        return;
+    }
+    if (!type || !name) { // Prevent missing field errors
         sendMessage(channelID, "Not enough information provided. Try `/create <public|members|recruiter|private> CHANNEL NAME`.");
         return;
     }
     type = type.toLowerCase(); // Convert type to lowercase
     if (type == "member") type = "members"; // Convert misspellings
+    if (type.indexOf("recruit") == 0) type = "recruiter";
+    if (["public", "members", "recruiter", "private"].indexOf(type) == -1) { // Prevent channel type errors
+        sendMessage(channelID, "I didn't recognise the channel type **"+type+"**. It should be either `public`, `members`, `recruiter` or `private`.");
+        return;
+    }
     log("Creating a pair of channels with base name: "+name, 2);
-    createChannel("--- "+name, "voice", bot.channels[channelID].guild_id, function(err, vcid) {
-        if (err) {
+    createChannel("۰ ۰ "+name, "voice", bot.channels[channelID].guild_id, function(err, vcid) { // Attempt to create the voice channel. Note: the dots are Arabic characters (U+06F0)
+        if (err) { // If it failed, send a failure message and quit.
             sendEmbedMessage(channelID, "Failed to create a voice channel", "Something went wrong, and the voice channel wasn't created. Maybe you mistyped some information, or the bot doesn't have permission to manage channels.", "error");
             log("Voice channel creation failed!\ntype: "+type+", name: "+name, 1);
-        } else {
-            createChannel(name, "text", bot.channels[channelID].guild_id, function(err, tcid) {
-                if (err) {
+        } else { // If it succeeded...
+            configurables.channelActivity[vcid] = {time: Date.now(), members: [userID]};
+            createChannel(name, "text", bot.channels[channelID].guild_id, function(err, tcid) { // Attempt to create the text channel
+                if (err) { // If it failed, send a message and quit.
                     sendEmbedMessage(channelID, "Failed to create a text channel", "A voice channel was created but a text channel wasn't. Maybe the channel name couldn't be converted to a text-channel-friendly format. ("+name+" → "+makeStringGreatAgain(name)+")", "error");
                     log("Text channel creation failed!\ntype: "+type+", name: "+name+", greatName: "+makeStringGreatAgain(name), 1);
-                } else {
-                    bot.createInvite({channelID: vcid}, function(err, res) {
-                        if (!err) {
+                } else { // If it succeeded...
+                    configurables.channelActivity[vcid].text = tcid;
+                    bot.createInvite({channelID: vcid}, function(err, res) { // Attempt to create an instant invite link to the voice channel
+                        if (!err) { // If it succeeded, send the success message with link
                             sendEmbedMessage(channelID, "multifield", [
                             {
                                 name: "Created channels successfully",
@@ -367,18 +455,47 @@ function friendlyChannelCreation(name, type, channelID) {
                                 name: "Instant invite link (click to connect)",
                                 value: "https://discord.gg/"+res.code
                             }], "success");
-                        } else {
-                            sendEmbedMessage(channelID, "Created channels successfully", "A new voice channel and a new text channel were created.", "success");
+                        } else { // If it failed, just send the success message
+                            sendEmbedMessage(channelID, "Created channels successfully", "You now have a new voice channel named **"+bot.channels[vcid].name+"** and a text channel named **"+bot.channels[tcid].name+"**.", "success");
                         }
+                        log("Channel creation successful", 2);
                     });
+                    let tcPermissions = {}; // As soon as the text channel is created, set its permissions
+                    tcPermissions[bot.channels[tcid].guild_id] = {deny: [Discord.Permissions.TEXT_READ_MESSAGES], allow: [Discord.Permissions.TEXT_EMBED_LINKS, Discord.Permissions.TEXT_ATTACH_FILES, Discord.Permissions.TEXT_SEND_TTS_MESSAGE]};
+                    tcPermissions[userID] = {allow: [Discord.Permissions.TEXT_READ_MESSAGES]};
+                    setChannelPermissions(tcid, tcPermissions);
+                    sendMessage(tcid, "REMEMBER: No one else can see this channel until you invite them (or they connect to the linked voice channel).\nUse `/invite @mention`.");
                     log("Created a pair of channels: "+name+"/"+makeStringGreatAgain(name), 2);
                 }
             });
+            let vcPermissions = {}; // As soon as the voice channel is created, set its permissions
+            //for (let r of configurables.roleHierarchy["VCmoderators"]) vcPermissions[r] = {allow: [Discord.Permissions.VOICE_CONNECT]}; // Allow voice chat moderators to connect //TODO: Uncomment this line
+            switch (type) {
+            case "public":
+                // No other permissions need to be set for public channels.
+                break;
+            case "members":
+                vcPermissions[bot.channels[vcid].guild_id] = {deny: [Discord.Permissions.VOICE_CONNECT]}; // Deny everyone
+                vcPermissions[memberRoleOfUser(userID, bot.channels[channelID].guild_id)] = {allow: [Discord.Permissions.VOICE_CONNECT]}; // Allow clan members
+                break;
+            case "recruiter":
+                vcPermissions[bot.channels[vcid].guild_id] = {deny: [Discord.Permissions.VOICE_CONNECT]}; // Deny everyone
+                vcPermissions[configurables.roleHierarchy["needsReceptionist"][0]] = {allow: [Discord.Permissions.VOICE_CONNECT]}; // Allow needs receptionist
+                vcPermissions[configurables.memberRoleLookup[memberRoleOfUser(userID, bot.channels[channelID].guild_id)].header] = {allow: [Discord.Permissions.VOICE_CONNECT]}; // Allow clan header
+                vcPermissions[userID] = {allow: [Discord.Permissions.VOICE_CONNECT]}; // Allow user
+                break;
+            case "private":
+                vcPermissions[bot.channels[vcid].guild_id] = {deny: [Discord.Permissions.VOICE_CONNECT]}; // Deny everyone
+                vcPermissions[configurables.memberRoleLookup[memberRoleOfUser(userID, bot.channels[channelID].guild_id)].header] = {allow: [Discord.Permissions.VOICE_CONNECT]}; // Allow header
+                vcPermissions[userID] = {allow: [Discord.Permissions.VOICE_CONNECT]}; // Allow user
+                break;
+            }
+            setChannelPermissions(vcid, vcPermissions);
         }
     });
     return;
     
-    if (type == "/create") { // 
+    if (type == "/create") { 
         bot.sendMessage({to: channelID, message: "Not enough information provided. Try `/create <public|members|recruiter|private> CHANNEL NAME`."});
     } else if (words[1] != "public" && words[1] != "members" && words[1] != "private" && words[1] != "recruiter") {
         bot.sendMessage({to: channelID, message: "Incorrect channel type - must be `public`, `members`, `recruiter` or `private`. Try `/create <public|members|recruiter|private> CHANNEL NAME`."});
@@ -443,7 +560,6 @@ function friendlyChannelCreation(name, type, channelID) {
                             }
                         }
                     });
-                    console.log("Created channel "+bot.channels[res.id].name+" at "+Date.now()+"\nEntire list looks like:\n"+JSON.stringify(channel_activity));
                     if (words[1] == "members") {
                         bot.editChannelPermissions({channelID: res.id, roleID: server, deny: [Discord.Permissions.VOICE_CONNECT]});
                         bot.editChannelPermissions({channelID: res.id, roleID: roleP, allow: [Discord.Permissions.VOICE_CONNECT]});
@@ -525,13 +641,32 @@ bot.on("ready", function() {
         let modified = false;
         for (member in bot.servers[configurables.server].members) {
             let vcid = bot.servers[configurables.server].members[member].voice_channel_id;
-            if (vcid) {
+            if (vcid != null) {
                 awardXP(member, Math.floor(Math.random()*3+4), 10);
+                if (configurables.channelActivity[vcid]) {
+                    configurables.channelActivity[vcid].time = Date.now();
+                    if (configurables.channelActivity[vcid].members.indexOf(userID) == -1) {
+                        configurables.channelActivity[vcid].members.push(userID);
+                        editChannelPermissions(vcid, userID, {allow: [Discord.Permissions.TEXT_READ_MESSAGES]});
+                    }
+                }
             }
         }
         if (modified) fs.writeFile("xpreloaded.txt", "let xp = "+JSON.stringify(xp), {encoding: "utf8"}, function() {});
+        for (let channelID in configurables.channelActivity) {
+            if ((Date.now() - configurables.channelActivity[channelID].time) > configurables.channelTimeout) {
+                log("Deleting channel "+JSON.stringify(bot.channels[channelID]), 2);
+                deleteChannel(channelID, function() {
+                    deleteChannel(configurables.channelActivity[channelID].text, function() {
+                        delete configurables.channelActivity[channelID];
+                    });
+                    createIndex(configurables.server);
+                    fixChannelPositions(configurables.server);
+                });
+            }
+        }
         //saveConfigurables();
-    }, 10000);
+    }, 5000);
 });
 
 // When a message is sent
@@ -557,7 +692,7 @@ bot.on("message", function(user, userID, channelID, message, event) {
             friendlyRoleLookup(channelID, message.split(" ").slice(1).join(" "));
             break;
         case "/create": // Create a temporary voice channel and linked text channel
-            friendlyChannelCreation(message.split(" ").slice(2).join(" "), message.split(" ")[1], channelID);
+            friendlyChannelCreation(message.split(" ").slice(2).join(" "), message.split(" ")[1], userID, channelID);
             break;
         }
     }
@@ -567,5 +702,5 @@ bot.on("message", function(user, userID, channelID, message, event) {
 // If the bot disconnects from Discord...
 bot.on("disconnect", function() {
     bot.connect(); // Reconnect.
-    console.log("Bot disconnected. Reconnecting...");
+    log("Bot disconnected. Reconnecting...", 1);
 });
