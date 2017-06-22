@@ -104,11 +104,18 @@ function matchingElementFromArray(array1, array2) {
 // Given a word and a number, returns the plural form of that word.
 function plural(word, number) {
     var plurals = {
-        is: "are", foot: "feet", person: "people", werewolf: "werewolves", wolf: "wolves" // Add more irrlegular plurals here if you need them
+        is: "are", foot: "feet", person: "people", werewolf: "werewolves", wolf: "wolves", that: "those" // Add more irrlegular plurals here if you need them
     };
     if (number != 1) {
-        if (plurals[word] != undefined) {
-            word = plurals[word];
+        if (plurals[word.toLowerCase()] != undefined) {
+
+            if (word.toUpperCase() == word) {
+                word = plurals[word.toLowerCase()].toUpperCase();
+            } else if (word.charAt(0).toUpperCase() == word.charAt(0)) {
+                word = plurals[word.toLowerCase()].charAt(0).toUpperCase() + plurals[word.toLowerCase()].slice(1);
+            } else {
+                word = plurals[word.toLowerCase()];
+            }
         } else {
             if (word.endsWith("s") || word.endsWith("ch")) {
                 word += "es";
@@ -255,7 +262,7 @@ function editChannelPermissions(channelID, groupID, permissions, attempts) {
             }
             log(toLog, 1);
         } else { // If there was no error
-            log("Edited single-group permissions of "+channelID, 2);
+            log("Edited single-group permissions of "+channelID+" (took "+(attempts+1)+" "+plural("attempt", attempts+1)+")", 2);
         }
     });
 }
@@ -583,6 +590,24 @@ function friendlyChannelCreation(name, type, userID, channelID) {
     }
 }
 
+function inviteToChannel(userID, channelID, mentions) {
+    let vcid = bot.servers[bot.channels[channelID].guild_id].members[userID].voice_channel_id;
+    if (mentions.length == 0) {
+        sendEmbedMessage(channelID, "No one was invited!", "Add some @mentions after /invite.", "error");
+    } else if (vcid == null) {
+        sendEmbedMessage(channelID, plural("That", mentions.length)+" "+plural("user", mentions.length)+" could not be invited!", "Connect to a voice channel, then issue the command again.", "error");
+    } else if (configurables.channelActivity[vcid] == undefined) {
+        sendEmbedMessage(channelID, plural("That", mentions.length)+" "+plural("user", mentions.length)+" could not be invited!", "You can only invite users to private rooms.", "error");
+    } else {
+        for (let m of mentions) {
+            editChannelPermissions(vcid, m.id, {allow: [Discord.Permissions.VOICE_CONNECT]});
+            editChannelPermissions(configurables.channelActivity[vcid].text, m.id, {allow: [Discord.Permissions.TEXT_READ_MESSAGES]});
+            configurables.channelActivity[vcid].members.push(m.id);
+        }
+        sendEmbedMessage(channelID, "Permissions updated", "Allowed **"+mentions.length+"** more "+plural("person", mentions.length)+" to connect to **"+bot.channels[vcid].name+"** (and linked text channel)", "success");
+    }
+}
+
 // Gathers information about the rank of the supplied userID and sends it.
 function rank(userID, channelID) {
     if (xp[userID] == undefined) { // If there's no data available...
@@ -645,8 +670,8 @@ bot.on("ready", function() {
                 awardXP(member, Math.floor(Math.random()*3+4), 10);
                 if (configurables.channelActivity[vcid]) {
                     configurables.channelActivity[vcid].time = Date.now();
-                    if (configurables.channelActivity[vcid].members.indexOf(userID) == -1) {
-                        configurables.channelActivity[vcid].members.push(userID);
+                    if (configurables.channelActivity[vcid].members.indexOf(member) == -1) {
+                        configurables.channelActivity[vcid].members.push(member);
                         editChannelPermissions(vcid, userID, {allow: [Discord.Permissions.TEXT_READ_MESSAGES]});
                     }
                 }
@@ -693,6 +718,9 @@ bot.on("message", function(user, userID, channelID, message, event) {
             break;
         case "/create": // Create a temporary voice channel and linked text channel
             friendlyChannelCreation(message.split(" ").slice(2).join(" "), message.split(" ")[1], userID, channelID);
+            break;
+        case "/invite": // Invite a user to a temporary voice channel
+            inviteToChannel(userID, channelID, event.d.mentions);
             break;
         }
     }
