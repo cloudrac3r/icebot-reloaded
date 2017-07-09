@@ -6,7 +6,7 @@ let fs = require("fs");
 
 /// === GLOBALS ===
 let channelIndex = [];
-const messagePrefixes = {0: "[!]", 1: "[:]", 2: "[ ]"};
+const messagePrefixes = {0: "[#]", 1: "[.]", 2: "[ ]"};
 
 // Read the bot token from a file
 let token = fs.readFileSync("token.txt", {encoding: "utf8"}).split("\n")[0];
@@ -55,27 +55,27 @@ Date.prototype.customFormat = function(formatString){
 }
 
 // Checks the role hierarchy to see if a role is above another role.
-function isAbove(r1, r2) {
-    if (typeof(configurables.roleHierarchy[r1]) != "object") {
+function isAbove(r1, r2, object) {
+    if (typeof(object[r1]) != "object") {
         return false;
-    } else if (configurables.roleHierarchy[r1].indexOf(r2) != -1) {
+    } else if (object[r1].indexOf(r2) != -1) {
         return true;
     } else {
         let result = false;
         let index = 0;
-        while (!result && index < configurables.roleHierarchy[r1].length) {
-            if (configurables.roleHierarchy[r1][index] != r1) {
-                if (isAbove(configurables.roleHierarchy[r1][index], r2)) return true;
+        while (!result && index < object[r1].length) {
+            if (object[r1][index] != r1) {
+                if (isAbove(object[r1][index], r2, object)) return true;
             }
             index++;
         }
-        return false;
     }
 }
 
 // Log a message to console with regards to the logLevel (severity)
 // Levels: 0 (critical) 1 (good to know) 2 (everything)
 function log(message, level) {
+    if (typeof(message) == "object") message = JSON.stringify(message);
     let prefix = messagePrefixes[level];
     if (!prefix) prefix = "[?]";
     if (level <= configurables.logLevel) console.log(prefix+" "+message);
@@ -87,7 +87,7 @@ function log(message, level) {
 function makeStringGreatAgain(string) {
     let fakeNews = string.toLowerCase();
     let okay = fakeNews.replace(/ /g, "_");
-    let good = okay.replace(/[^_a-z]/g, "-");
+    let good = okay.replace(/[^_a-z0-9]/g, "-");
     let great = good.replace(/^[-_]*/, "");
     return great;
 }
@@ -154,7 +154,6 @@ function awardXP(userID, amount, time) {
         xp[userID].xp -= xp[userID].level*100;
         xp[userID].level++;
     }
-
 }
 
 // Create a new channel on a server.
@@ -200,12 +199,11 @@ function createIndex(server) {
     for (let i = 0; i <= highest; i++) { // Loop through and push channels to channelIndex
         for (c in bot.servers[server].channels) {
             if (bot.servers[server].channels[c].position == i && bot.servers[server].channels[c].type == "voice") {
-                channelIndex.push(bot.servers[server].channels[c]);
+                channelIndex.push(c);
             }
         }
     }
     log("Indexed in "+(Date.now()-t)+"ms", 2); // Log the loop time
-    fixChannelPositions(); // Send a request to Discord
 }
 
 // Delete a channel.
@@ -262,7 +260,7 @@ function editChannelPermissions(channelID, groupID, permissions, attempts) {
             }
             log(toLog, 1);
         } else { // If there was no error
-            log("Edited single-group permissions of "+channelID+" (took "+(attempts+1)+" "+plural("attempt", attempts+1)+")", 2);
+            log("Edited single-group permissions for "+channelID+"/"+groupID+" (took "+(attempts+1)+" "+plural("attempt", attempts+1)+")", 2);
         }
     });
 }
@@ -279,25 +277,23 @@ function getRoleID(name, server) {
 // Set the position values of every channel
 function fixChannelPositions(server, attempts) {
     if (!attempts) attempts = 0;
-    let body = []; // What to send
+    let send = []; // What to send
     for (let i = 0; i < channelIndex.length; i++) { // Add every channel which needs to move
-        if (channelIndex[i].position != i) {
-            body.push({"id": channelIndex[i].id, "position": i});
-        }
+        if (bot.servers[server].channels[channelIndex[i]].position != i) send.push({"id": channelIndex[i], "position": i});
     }
     request({
-        url: "https://discordapp.com/api/guilds/"+configurables.server+"/channels",
+        url: "https://discordapp.com/api/guilds/"+server+"/channels",
         headers: {
-            "User-Agent": "DiscordBot (https://discordapp.com/, 1.0)",
+            "User-Agent": "DiscordBot (https://discordapp.com/, 2.0)",
             "Authorization": "Bot "+token,
             "Content-Type": "application/json"
         },
         method: "PATCH",
-        body: JSON.stringify(body)
+        body: JSON.stringify(send)
     }, function(error, response, body) {
         if (error) { // If an error occurred
             attempts++;
-            let toLog = "An error occurred while resetting channel positions (attempt "+attempts+")!\nlength: "+channelIndex.length+"\nError: "+error+", response: "+response+", body: "+body+"\n";
+            let toLog = "An error occurred while resetting channel positions (attempt "+attempts+")!\nlength: "+channelIndex.length+"\nError: "+error+"\nresponse: "+JSON.stringify(response)+"\nbody: "+JSON.stringify(body)+"\n";
             // Retry (or not)
             if (attempts > configurables.maxAttempts) {
                 toLog += "Will not retry.";
@@ -309,7 +305,16 @@ function fixChannelPositions(server, attempts) {
             }
             log(toLog, 1);
         } else { // If there was no error
-            log("Reset channel positions successfully", 2);
+            success = true;
+            for (let i of send) {
+                if (i.position != bot.servers[server].channels[i.id].position) success = false;
+            }
+            if (!success) {
+                fixChannelPositions(server);
+                log("Channel positions weren't actually reset properly, will retry", 2);
+            } else {
+                log("Reset channel positions successfully", 2);
+            }
         }
     });
 }
@@ -404,6 +409,36 @@ function setChannelPermissions(channelID, permissions) {
     log("Setting multi-group permissions ("+count+" groups) for channel "+channelID, 2);
 }
 
+function setUserRole(userID, roleID, server, mode, callback, attempts) {
+    if (!attempts) attempts = 0; // Set attempts if it was not set
+    let f;
+    if (mode) {
+        f = "addToRole";
+    } else {
+        f = "removeFromRole";
+    }
+    bot[f]({userID: userID, serverID: server, roleID: roleID}, function(err) {
+        if (err) { // If an error occurred
+            attempts++;
+            let toLog = "An error occurred while setting a role (attempt "+attempts+")!\nuserID: "+userID+", roleID: "+roleID+"\nError: "+err+"\n";
+            // Retry (or not)
+            if (attempts >= configurables.maxAttempts) {
+                toLog += "Will not retry.";
+                if (callback) callback(true);
+            } else {
+                toLog += "Will retry in "+configurables.retryTimeout+"ms.";
+                setTimeout(function() {
+                    setUserRole(userID, roleID, server, mode, callback, attempts);
+                }, configurables.retryTimeout);
+            }
+            log(toLog, 1);
+        } else { // If there was no error
+            log("Set the role "+roleID+" on "+userID, 2);
+            if (callback) callback(false);
+        }
+    });
+}
+
 // Given a userID, return the username or nickname.
 function userIDToNick(userID, serverID) {
     if (serverID) { // If a server was specified...
@@ -415,12 +450,100 @@ function userIDToNick(userID, serverID) {
 
 /// === BOT FUNCTIONS ===
 
+// Assign or remove (unassign) a role on a user
+function assignRole(userID, channelID, targetID, roleName, mode) {
+    // Set the assign mode
+    let command = "assign";
+    if (!mode) {
+        command = "unassign";
+    }
+    // Check that a target was specified
+    if (!targetID) {
+        sendEmbedMessage(channelID, "Failed to set role!", "You must specify a target user. Try `/"+command+" @mention Role Name`.", "error");
+        return;
+    }
+    targetID = targetID.id;
+    // Check that the role exists
+    let roleID = getRoleID(roleName, bot.channels[channelID].guild_id);
+    if (!roleID) {
+        sendEmbedMessage(channelID, "Failed to set role!", "That role (**­"+roleName+"**) does not exist. Check that you spelled it correctly.", "error"); //NOTE: a zero-width space is used after the first **
+        return;
+    }
+    // Check that assigning the role is permitted
+    let allowed = false;
+    for (let r of bot.servers[bot.channels[channelID].guild_id].members[userID].roles) {
+        if (isAbove(r, roleID, configurables.roleHierarchy)) allowed = true;
+    }
+    if (!allowed) {
+        for (let r of bot.servers[bot.channels[channelID].guild_id].members[userID].roles) {
+            if (isAbove(r, roleID, configurables.clanHierarchy) && memberRoleOfUser(userID, bot.channels[channelID].guild_id) == memberRoleOfUser(targetID, bot.channels[channelID].guild_id)) allowed = true;
+        }
+    }
+    if (!allowed) {
+        sendEmbedMessage(channelID, "Failed to set role!", "You are not permitted to set that role.", "error");
+        return;
+    }
+    // Assign the role
+    log(targetID, 0);
+    setUserRole(targetID, roleID, bot.channels[channelID].guild_id, mode, function(err) {
+        if (err) {
+            sendEmbedMessage(channelID, "Failed to set role!", "All checks passed, but Discord wouldn't let me set the role. Check that this bot user has the right permissions.", "error");
+        } else {
+            sendEmbedMessage(channelID, "Set role successfully!", "The role **"+roleName+"** was "+command+"ed on **"+userIDToNick(targetID, bot.channels[channelID].guild_id)+"**.", "success");
+        }
+    });
+}
+
+// Run input as a JS command.
 function botEval(userID, channelID, command) {
     if (configurables.botAdmins.indexOf(userID) != -1 || matchingElementFromArray(bot.servers[bot.channels[channelID].guild_id].members[userID].roles, configurables.roleHierarchy["ADMIN"]).length > 0) {
         sendMessage(channelID, eval(command));
     } else {
         sendMessage(channelID, "You don't have sufficient permissions to eval anything. Add your userID to `configurables.botAdmins` or obtain an admin role.");
     }
+}
+
+// Change a user's nickname.
+function changeName(userID, channelID, targetID, nick) {
+    // Check to make sure the required rank (Alliance Staff Access) is held
+    if (bot.servers[bot.channels[channelID].guild_id].members[userID].roles.indexOf("313818382564589569") == -1) {
+        sendEmbedMessage(channelID, "Failed to change nickname!", "You need the Alliance Staff Access role to be able to change nicknames.", "error");
+        return;
+    }
+    // Check for a mention
+    if (!targetID) {
+        sendEmbedMessage(channelID, "Failed to change nickname!", "You must @mention a user to change the name of. Try `/changename @mention New Name`.", "error");
+        return;
+    }
+    targetID = targetID.id;
+    log(targetID, 0);
+    // Check to make sure the target user has the Needs Receptionist role
+    if (bot.servers[bot.channels[channelID].guild_id].members[targetID].roles.indexOf(configurables.needsReceptionistRole) == -1) {
+        sendEmbedMessage(channelID, "Failed to change nickname!", "The target user needs the Needs Receptionist role.", "error");
+        return;
+    }
+    // Change the nickname
+    if (nick == "") {
+        sendEmbedMessage(channelID, "Failed to change nickname!", "You must supply a new nickname.", "error");
+    } else if (nick.indexOf(" ") != -1) {
+        sendEmbedMessage(channelID, "Failed to change nickname!", "Warframe names don't have spaces. You probably entered an incorrect name.", "error");
+    } else {
+        bot.editNickname({serverID: bot.channels[channelID].guild_id, userID: targetID, nick: nick}, function(err) {
+            if (err) {
+                sendEmbedMessage(channelID, "Failed to change nickname!", "Don't panic, you used the command correctly. <@176580265294954507> is on his way.", "error");
+            } else {
+                sendEmbedMessage(channelID, "Changed nickname successfully!", "**"+bot.users[targetID].username+"**'s name was changed to **"+nick+"**.", "success");
+            }
+        });
+    }
+}
+
+// Set the timeout on temporary channels 
+function deleteTemporaryChannels() {
+    for (let i in configurables.channelActivity) {
+        configurables.channelActivity[i].time = Date.now()-configurables.channelTimeout;
+    }
+    log("Set unused temporary channels to be deleted on next cycle", 2);
 }
 
 function friendlyChannelCreation(name, type, userID, channelID) {
@@ -445,8 +568,10 @@ function friendlyChannelCreation(name, type, userID, channelID) {
             sendEmbedMessage(channelID, "Failed to create a voice channel", "Something went wrong, and the voice channel wasn't created. Maybe you mistyped some information, or the bot doesn't have permission to manage channels.", "error");
             log("Voice channel creation failed!\ntype: "+type+", name: "+name, 1);
         } else { // If it succeeded...
+            // Add to channel list
             configurables.channelActivity[vcid] = {time: Date.now(), members: [userID]};
-            createChannel(name, "text", bot.channels[channelID].guild_id, function(err, tcid) { // Attempt to create the text channel
+            // Attempt to create the text channel
+            createChannel(name, "text", bot.channels[channelID].guild_id, function(err, tcid) {
                 if (err) { // If it failed, send a message and quit.
                     sendEmbedMessage(channelID, "Failed to create a text channel", "A voice channel was created but a text channel wasn't. Maybe the channel name couldn't be converted to a text-channel-friendly format. ("+name+" → "+makeStringGreatAgain(name)+")", "error");
                     log("Text channel creation failed!\ntype: "+type+", name: "+name+", greatName: "+makeStringGreatAgain(name), 1);
@@ -467,37 +592,45 @@ function friendlyChannelCreation(name, type, userID, channelID) {
                         }
                         log("Channel creation successful", 2);
                     });
-                    let tcPermissions = {}; // As soon as the text channel is created, set its permissions
-                    tcPermissions[bot.channels[tcid].guild_id] = {deny: [Discord.Permissions.TEXT_READ_MESSAGES], allow: [Discord.Permissions.TEXT_EMBED_LINKS, Discord.Permissions.TEXT_ATTACH_FILES, Discord.Permissions.TEXT_SEND_TTS_MESSAGE]};
-                    tcPermissions[userID] = {allow: [Discord.Permissions.TEXT_READ_MESSAGES]};
-                    setChannelPermissions(tcid, tcPermissions);
+                    editChannelPermissions(tcid, bot.channels[tcid].guild_id, {deny: [Discord.Permissions.TEXT_READ_MESSAGES], allow: [Discord.Permissions.TEXT_EMBED_LINKS, Discord.Permissions.TEXT_ATTACH_FILES, Discord.Permissions.TEXT_SEND_TTS_MESSAGE]});
+                    editChannelPermissions(tcid, userID, {allow: [Discord.Permissions.TEXT_READ_MESSAGES, Discord.Permissions.GENERAL_MANAGE_CHANNELS]});
                     sendMessage(tcid, "REMEMBER: No one else can see this channel until you invite them (or they connect to the linked voice channel).\nUse `/invite @mention`.");
                     log("Created a pair of channels: "+name+"/"+makeStringGreatAgain(name), 2);
                 }
             });
-            let vcPermissions = {}; // As soon as the voice channel is created, set its permissions
-            //for (let r of configurables.roleHierarchy["VCmoderators"]) vcPermissions[r] = {allow: [Discord.Permissions.VOICE_CONNECT]}; // Allow voice chat moderators to connect //TODO: Uncomment this line
+            // As soon as the voice channel is created, set its permissions
+            for (let r of configurables.roleHierarchy["VCModerators"]) editChannelPermissions(vcid, r, {allow: [Discord.Permissions.VOICE_CONNECT]}); // Allow voice chat moderators to connect
+            for (let r of configurables.roleHierarchy["Moderators"]) editChannelPermissions(vcid, r, {allow: [Discord.Permissions.VOICE_CONNECT, Discord.Permissions.GENERAL_MANAGE_CHANNELS]}); // Allow moderators to moderate
+            editChannelPermissions(vcid, userID, {allow: [Discord.Permissions.VOICE_CONNECT, Discord.Permissions.GENERAL_MANAGE_CHANNELS]}); // Allow creator
             switch (type) {
             case "public":
                 // No other permissions need to be set for public channels.
                 break;
             case "members":
-                vcPermissions[bot.channels[vcid].guild_id] = {deny: [Discord.Permissions.VOICE_CONNECT]}; // Deny everyone
-                vcPermissions[memberRoleOfUser(userID, bot.channels[channelID].guild_id)] = {allow: [Discord.Permissions.VOICE_CONNECT]}; // Allow clan members
-                break;
-            case "recruiter":
-                vcPermissions[bot.channels[vcid].guild_id] = {deny: [Discord.Permissions.VOICE_CONNECT]}; // Deny everyone
-                vcPermissions[configurables.roleHierarchy["needsReceptionist"][0]] = {allow: [Discord.Permissions.VOICE_CONNECT]}; // Allow needs receptionist
-                vcPermissions[configurables.memberRoleLookup[memberRoleOfUser(userID, bot.channels[channelID].guild_id)].header] = {allow: [Discord.Permissions.VOICE_CONNECT]}; // Allow clan header
-                vcPermissions[userID] = {allow: [Discord.Permissions.VOICE_CONNECT]}; // Allow user
+                editChannelPermissions(vcid, bot.channels[vcid].guild_id, {deny: [Discord.Permissions.VOICE_CONNECT]}); // Deny everyone
+                editChannelPermissions(vcid, memberRoleOfUser(userID, bot.channels[channelID].guild_id), {allow: [Discord.Permissions.VOICE_CONNECT]}); // Allow clan members
                 break;
             case "private":
-                vcPermissions[bot.channels[vcid].guild_id] = {deny: [Discord.Permissions.VOICE_CONNECT]}; // Deny everyone
-                vcPermissions[configurables.memberRoleLookup[memberRoleOfUser(userID, bot.channels[channelID].guild_id)].header] = {allow: [Discord.Permissions.VOICE_CONNECT]}; // Allow header
-                vcPermissions[userID] = {allow: [Discord.Permissions.VOICE_CONNECT]}; // Allow user
+                editChannelPermissions(vcid, bot.channels[vcid].guild_id, {deny: [Discord.Permissions.VOICE_CONNECT]}); // Deny everyone
                 break;
             }
-            setChannelPermissions(vcid, vcPermissions);
+            // Move the voice channel to the correct place
+            switch (type) {
+            case "recruiter":
+                type = "public";
+                break;
+            case "private":
+                type = "members";
+                break;
+            }
+            createIndex(bot.channels[vcid].guild_id); // Create the channel index
+            log("Created index length "+channelIndex.length, 0);
+            channelIndex.splice(channelIndex.indexOf(vcid), 1); // Remove the voice channel from the index
+            log("Removed channel length "+channelIndex.length, 0);
+            channelIndex.splice(bot.servers[bot.channels[vcid].guild_id].channels[configurables.memberRoleLookup[memberRoleOfUser(userID, bot.channels[vcid].guild_id)][type]].position+1, 0, vcid); // Add the channel in the right place in the index. :hippo:
+            log("Added channel length "+channelIndex.length, 0);
+            fixChannelPositions(bot.channels[vcid].guild_id); // Ask Discord to move the channels
+            log("Asked Discord", 0);
         }
     });
     return;
@@ -662,17 +795,20 @@ function friendlyRoleLookup(channelID, roleName) {
 // When the bot connects to Discord
 bot.on("ready", function() {
     log("Logged in", 1);
+    createIndex(configurables.server);
+    fixChannelPositions(configurables.server);
     setInterval(function() {
         let modified = false;
         for (member in bot.servers[configurables.server].members) {
             let vcid = bot.servers[configurables.server].members[member].voice_channel_id;
             if (vcid != null) {
                 awardXP(member, Math.floor(Math.random()*3+4), 10);
+                modified = true;
                 if (configurables.channelActivity[vcid]) {
                     configurables.channelActivity[vcid].time = Date.now();
                     if (configurables.channelActivity[vcid].members.indexOf(member) == -1) {
                         configurables.channelActivity[vcid].members.push(member);
-                        editChannelPermissions(vcid, userID, {allow: [Discord.Permissions.TEXT_READ_MESSAGES]});
+                        editChannelPermissions(configurables.channelActivity[vcid].text, member, {allow: [Discord.Permissions.TEXT_READ_MESSAGES]});
                     }
                 }
             }
@@ -685,20 +821,43 @@ bot.on("ready", function() {
                     deleteChannel(configurables.channelActivity[channelID].text, function() {
                         delete configurables.channelActivity[channelID];
                     });
-                    createIndex(configurables.server);
-                    fixChannelPositions(configurables.server);
                 });
             }
         }
-        //saveConfigurables();
+        saveConfigurables();
     }, 5000);
 });
 
 // When a message is sent
 bot.on("message", function(user, userID, channelID, message, event) {
+    // Failsafes
+    if (userID == "326698088108392449") return; // WTF Dyno >:(
+    if (!bot.users[userID]) {
+        log("userID not found: "+userID, 0);
+        return;
+    }
     if (bot.users[userID].bot) return; // Ignore messages from bot users
     message = message.replace(/  */g, " "); // Convert multiple spaces into 1 space
-    if (message.charAt(0) == "/") {
+    // Moderation
+    if (message.search(/discord.gg\/[A-Za-z0-9]{5,}/) != -1 && userID != bot.id) {
+        bot.queryInvite(message.match(/discord.gg\/([A-Za-z0-9]{5,})/)[1], function(e, r) {
+            let d = false;
+            if (!r) d = true;
+            if (r) if (r.guild.id != bot.channels[channelID].guild_id) d = true;
+            if (d) bot.deleteMessage({channelID: channelID, messageID: event.d.id}, function(e) {
+                if (!e) sendMessage(channelID, "<@"+userID+"> Instant invite links to other servers are not allowed here! If you need to invite someone to a server, send the link via Direct Message.");
+            });
+        });
+    // Commands
+    } else if (message.charAt(0) == "/") {
+        if (configurables.whitelistedChannels.indexOf(channelID) == -1) {
+            let output = "You just used a command in **#"+bot.channels[channelID].name+"**. *This is severely discouraged!* You should only be using bot commands in these channels:\n";
+            for (let c of configurables.whitelistedChannels) {
+                output += "**#"+bot.channels[c].name+"**\n";
+            }
+            output += "You may only use commands outside of these channels if it's relevant to the current conversation! If your use of the command is not relevant to any ongoing conversation in the channel that you used it in, you should run the command in one of the channels mentioned above in order to be courteous to others and to stop seeing this message.";
+            sendMessage(userID, output);
+        }
         switch(message.split(" ")[0].toLowerCase()) { // Run code block based on first word of message
         case "/eval": // Run the message as a JS command
             botEval(userID, channelID, message.split(" ").slice(1).join(" "));
@@ -721,6 +880,16 @@ bot.on("message", function(user, userID, channelID, message, event) {
             break;
         case "/invite": // Invite a user to a temporary voice channel
             inviteToChannel(userID, channelID, event.d.mentions);
+            break;
+        /*case "/dtc": // Delete temporary channels
+            deleteTemporaryChannels();
+            break;*/
+        case "/assign":
+        case "/unassign":
+            assignRole(userID, channelID, event.d.mentions[0], message.split(" ").slice(2).join(" "), (message.charAt(2) == "s"));
+            break;
+        case "/changename":
+            changeName(userID, channelID, event.d.mentions[0], message.split(" ").slice(2).join(" "));
             break;
         }
     }
