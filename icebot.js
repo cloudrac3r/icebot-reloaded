@@ -343,14 +343,14 @@ function editChannelPermissions(channelID, groupID, permissions, attempts) {
             method: "GET",
         }, function(error, response, body) {
             if (error) {
-                if (!failed) failed = error;
+                if (failed == "") failed = error;
             } else {
                 let combined = {allow: 0, deny: 0};
                 if (permissions.allow) for (let i of permissions.allow) combined.allow += Math.pow(2, i);
                 if (permissions.deny) for (let i of permissions.deny) combined.deny += Math.pow(2, i);
                 for (let p of JSON.parse(body).permission_overwrites) {
                     if (p.id == groupID && ((p.allow & combined.allow) != combined.allow || (p.deny & combined.deny) != combined.deny)) {
-                        if (!failed) {
+                        if (failed == "") {
                             failed = "Discord lied";
                             log("Discord lied, here's the details:\nd.io permissions: "+JSON.stringify(permissions)+"\nDiscord permissions: "+JSON.stringify(combined)+"\nApplied permissions: "+JSON.stringify(p), 0);
                         }
