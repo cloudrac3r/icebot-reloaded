@@ -1,4 +1,47 @@
 {
+    "confirmationStrings": [
+        [
+            "alpha",
+            "angery",
+            "brave",
+            "chaffinch",
+            "delta",
+            "engine",
+            "final",
+            "grommit",
+            "hellix",
+            "result",
+            "serpent"
+        ],
+        [
+            "apple",
+            "banana",
+            "cherry",
+            "durian",
+            "eggplant",
+            "fruit",
+            "gherkin",
+            "heliotrope",
+            "salad",
+            "vegetable",
+            "zucchini"
+        ],
+        [
+            "one",
+            "two",
+            "three",
+            "four",
+            "five",
+            "six",
+            "seven",
+            "eight",
+            "nine",
+            "ten",
+            "eleven",
+            "twelve",
+            "forty-two"
+        ]
+    ],
     "logLevel": 2,
     "server": "301392540723052544",
     "colourLookup": {
@@ -9,30 +52,6 @@
     "channelTimeout": 30000,
     "maxAttempts": 3,
     "channelActivity": {
-        "336147969659371520": {
-            "time": 1500266251646,
-            "members": [
-                "157225022270734336",
-                "239656137656500224"
-            ],
-            "text": "336147970900623360"
-        },
-        "336234979920969748": {
-            "time": 1500266251646,
-            "members": [
-                "238637552418947075"
-            ],
-            "text": "336234980831133696"
-        },
-        "336349290534404110": {
-            "time": 1500266251646,
-            "members": [
-                "151078495567609856",
-                "208504540801007617",
-                "202406206856232960"
-            ],
-            "text": "336349291826249728"
-        }
     },
     "roleHierarchy": {
         "312812741448433665": [
@@ -346,5 +365,6 @@
             "319378672526163970",
             "313478838942171139"
         ]
-    }
+    },
+    "clanWaitingList": []
 }

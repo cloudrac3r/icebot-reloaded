@@ -7,6 +7,7 @@ let fs = require("fs");
 /// === GLOBALS ===
 let channelIndex = [];
 const messagePrefixes = {0: "[#]", 1: "[.]", 2: "[ ]"};
+let restarted = false;
 
 // Read the bot token from a file
 let token = fs.readFileSync("token.txt", {encoding: "utf8"}).split("\n")[0];
@@ -127,6 +128,11 @@ function plural(word, number) {
     return word;
 }
 
+// Given an array, returns a random item
+function randomResult(array) {
+   return array[Math.floor(Math.random()*array.length)];
+}
+
 /// === BOT UTILITY FUNCTIONS ===
 
 // Assigns roles that are required by other roles.
@@ -136,10 +142,8 @@ function assignExtraRoles(userID, serverID) {
         checked[a] = false;
     }
     for (let a in configurables.accessRequirements) {
-        log("Checking "+configurables.accessRequirements[a].length+" from "+a, 0);
         for (let r of bot.servers[serverID].members[userID].roles) {
             if (configurables.accessRequirements[a].indexOf(r) != -1) {
-                log("Role found in requirement list "+r, 0);
                 if (!checked[a]) {
                     checked[a] = true;
                     setUserRole(userID, a, serverID, true);
@@ -211,6 +215,45 @@ function createChannel(name, type, server, callback, attempts) {
     });
 }
 
+// Create a new role on a server.
+function createRole(name, server, colour, hoist, mentionable, permissions, callback, attempts) {
+    if (!name || !server) {
+        if (callback) callback(true);
+        return;
+    }
+    if (!attempts) attempts = 0; // Set attempts if it was not set
+    let failed = false;
+    bot.createRole(server, function(err, res) {
+        if (err) {
+            failed = true;
+        } else {
+            bot.editRole({serverID: server, roleID: res.id, name: name, color: colour, hoist: hoist, permissions: permissions, mentionable: mentionable}, function(err2, res2) {
+                if (err2) {
+                    failed = true;
+                }
+            });
+        }
+        if (failed) {
+            attempts++;
+            let toLog = "An error occurred while creating a role (attempt "+attempts+")!\nserverID: "+server+", name: "+name+"\nError: "+err+"\n";
+            // Retry (or not)
+            if (attempts >= configurables.maxAttempts) {
+                toLog += "Will not retry.";
+                if (callback) callback(true);
+            } else {
+                toLog += "Will retry in "+configurables.retryTimeout+"ms.";
+                setTimeout(function() {
+                    createRole(name, server, colour, hoist, mentionable, permissions, callback, attempts);
+                }, configurables.retryTimeout);
+            }
+            log(toLog, 1);
+        } else {
+            log("Created a role: "+name, 2);
+            if (callback) callback(false);
+        }
+    });
+}
+
 // Creates the channel index and sets channel positions correctly.
 function createIndex(server) {
     let t = Date.now(); // Time how long it took
@@ -258,6 +301,23 @@ function deleteChannel(channelID, callback, attempts) {
     });
 }
 
+// Delete expired uncreated clans
+function deleteExpiredClans(userID) {
+    let again = true; // Loop again
+    while (again) {
+        let i = 0; // Array element to check
+        again = false;
+        while (!again && i < configurables.clanWaitingList.length) {
+            if (configurables.clanWaitingList[i].timestamp + configurables.channelTimeout < Date.now() || configurables.clanWaitingList[i].userID == userID) {
+                log("Deleting uncreated clan "+configurables.clanWaitingList[i].fullName, 2);
+                configurables.clanWaitingList.splice(i, 1);
+                again = true; // Look for another from the start
+            }
+            i++;
+        }
+    }
+}
+
 // Edits the permissions of a voice or text channels for a single group.
 function editChannelPermissions(channelID, groupID, permissions, attempts) {
     if (!attempts) attempts = 0; // Set attempts if it was not set
@@ -269,51 +329,51 @@ function editChannelPermissions(channelID, groupID, permissions, attempts) {
         object.userID = groupID;
     }
     bot.editChannelPermissions(object, function(err) {
-        let failed = false;
+        let failed = "";
         if (err) { // If an error occurred
-            failed = true;
-        } else { // If there was no error
-            request({
-                url: "https://discordapp.com/api/channels/"+channelID,
-                headers: {
-                    "User-Agent": "DiscordBot (https://discordapp.com/, 2.0)",
-                    "Authorization": "Bot "+token,
-                    "Content-Type": "application/json"
-                },
-                method: "GET",
-            }, function(error, response, body) {
-                if (error) {
-                    failed = true;
-                } else {
-                    let combined = {allow: 0, deny: 0};
-                    if (permissions.allow) for (let i of permissions.allow) combined.allow += Math.pow(2, i);
-                    if (permissions.deny) for (let i of permissions.deny) combined.deny += Math.pow(2, i);
-                    for (let p of JSON.parse(body).permission_overwrites) {
-                        if (p.id == groupID && ((p.allow & combined.allow) != combined.allow || (p.deny & combined.deny) != combined.deny)) {
-                            failed = true;
-                            log("Discord lied, here's the details:\nd.io permissions: "+JSON.stringify(permissions)+"\nDiscord permissions: "+JSON.stringify(combined)+"\nApplied permissions: "+JSON.stringify(p), 1);
-                            error = "Discord lied";
+            failed = err;
+        }
+        request({
+            url: "https://discordapp.com/api/channels/"+channelID,
+            headers: {
+                "User-Agent": "DiscordBot (https://discordapp.com/, 2.0)",
+                "Authorization": "Bot "+token,
+                "Content-Type": "application/json"
+            },
+            method: "GET",
+        }, function(error, response, body) {
+            if (error) {
+                if (!failed) failed = error;
+            } else {
+                let combined = {allow: 0, deny: 0};
+                if (permissions.allow) for (let i of permissions.allow) combined.allow += Math.pow(2, i);
+                if (permissions.deny) for (let i of permissions.deny) combined.deny += Math.pow(2, i);
+                for (let p of JSON.parse(body).permission_overwrites) {
+                    if (p.id == groupID && ((p.allow & combined.allow) != combined.allow || (p.deny & combined.deny) != combined.deny)) {
+                        if (!failed) {
+                            failed = "Discord lied";
+                            log("Discord lied, here's the details:\nd.io permissions: "+JSON.stringify(permissions)+"\nDiscord permissions: "+JSON.stringify(combined)+"\nApplied permissions: "+JSON.stringify(p), 0);
                         }
                     }
                 }
-                if (failed) {
-                    attempts++;
-                    let toLog = "An error occurred while editing single-group channel permissions (attempt "+attempts+")!\nchannelID: "+channelID+", groupID: "+groupID+"\nError: "+(err || error)+"\n";
-                    // Retry (or not)
-                    if (attempts >= configurables.maxAttempts) {
-                        toLog += "Will not retry.";
-                    } else {
-                        toLog += "Will retry in "+configurables.retryTimeout+"ms.";
-                        setTimeout(function() {
-                            editChannelPermissions(channelID, groupID, permissions, attempts);
-                        }, configurables.retryTimeout);
-                    }
-                    log(toLog, 1);
+            }
+            if (failed) {
+                attempts++;
+                let toLog = "An error occurred while editing single-group channel permissions (attempt "+attempts+")!\nchannelID: "+channelID+", groupID: "+groupID+"\nError: "+failed+"\n";
+                // Retry (or not)
+                if (attempts >= configurables.maxAttempts) {
+                    toLog += "Will not retry.";
                 } else {
-                    log("Edited single-group permissions for "+channelID+"/"+groupID+" (took "+(attempts+1)+" "+plural("attempt", attempts+1)+")", 2);
+                    toLog += "Will retry in "+configurables.retryTimeout+"ms.";
+                    setTimeout(function() {
+                        editChannelPermissions(channelID, groupID, permissions, attempts);
+                    }, configurables.retryTimeout);
                 }
-            });
-        }
+                log(toLog, 1);
+            } else {
+                log("Edited single-group permissions for "+channelID+"/"+groupID+" (took "+(attempts+1)+" "+plural("attempt", attempts+1)+")", 2);
+            }
+        });
     });
 }
 
@@ -397,7 +457,7 @@ function sendEmbedMessage(channelID, title, message, type, attempts) {
     bot.sendMessage({
         to: channelID,
         embed: {
-            color: configurables.colourLookup[type],
+            color: configurables.colourLookup[type] || type,
             fields: fields
         }
     }, function(err) {
@@ -573,7 +633,6 @@ function changeName(userID, channelID, targetID, nick) {
         return;
     }
     targetID = targetID.id;
-    log(targetID, 0);
     // Check to make sure the target user has the Needs Receptionist role
     if (bot.servers[bot.channels[channelID].guild_id].members[targetID].roles.indexOf(configurables.needsReceptionistRole) == -1) {
         sendEmbedMessage(channelID, "Failed to change nickname!", "The target user needs the Needs Receptionist role.", "error");
@@ -592,6 +651,78 @@ function changeName(userID, channelID, targetID, nick) {
                 sendEmbedMessage(channelID, "Changed nickname successfully!", "**"+bot.users[targetID].username+"**'s name was changed to **"+nick+"**.", "success");
             }
         });
+    }
+}
+
+// Prepares to create an entire clan
+function createClan(userID, channelID, owner, short, full) {
+    deleteExpiredClans(userID);
+    for (let i = 0; i < configurables.clanWaitingList.length; i++) if (configurables.clanWaitingList[i].userID == userID) delete configurables.clanWaitingList[i];
+    if (!full || !owner) {
+        sendMessage(channelID, "Not enough information provided. Try `/clan @mention SHORT Full Clan Name`. Replace *SHORT* with a short name for the clan, e.g. *Crescent Moon Prime* → *CMP*, and *@mention* with a mention of the new Founding Warlord of the clan.");
+        return;
+    }
+    owner = owner.id;
+    let confirm = randomResult(configurables.confirmationStrings[0])+" "+randomResult(configurables.confirmationStrings[1])+" "+randomResult(configurables.confirmationStrings[2]);
+    configurables.clanWaitingList.push({userID: userID, confirmation: confirm, shortName: short, fullName: full, owner: owner, channelID: channelID, timestamp: Date.now()});
+    sendEmbedMessage(channelID, "multifield", [
+        {
+            name: "Details",
+            value: "**Name:** "+full+"\n**Short name:** "+short+"\n**Owner:** "+bot.users[owner].username,
+            inline: true
+        },{
+            name: "Roles",
+            value: full.toUpperCase()+"\n"+full+" Member\nFormer "+full+" Member",
+            inline: true
+        },{
+            name: "­", // Zero-width spaces are used here!!!!
+            value: "­",
+            inline: false
+        },{
+            name: "Text channels",
+            value: short+"_rules\n"+short+"_news\n"+short+"_clan_lobby\n"+short+"_staff_lobby",
+            inline: true
+        },{
+            name: "Voice channels",
+            value: full+"\n---Public Lobby\n---Members Lobby\n(seperator)",
+            inline: true
+        },{
+            name: "Confirm",
+            value: "/confirmclan "+confirm,
+            inline: false
+        }
+    ], 0xF07000);
+}
+
+// Confirms the clan creation and does the stuff
+function confirmClan(userID, channelID, confirmation) {
+    let created = false;
+    for (let i of configurables.clanWaitingList) {
+        if (i.userID == userID && i.confirmation == confirmation && !created) {
+            created = true;
+            let serverID = bot.channels[i.channelID].guild_id;
+            createRole("Former "+i.fullName+" Member", i.serverID, 0x3292b3);
+            createRole(i.fullName.toUpperCase(), i.serverID, 0, true, true, {allow: [Discord.Permissions.TEXT_READ_MESSAGES, Discord.Permissions.TEXT_SEND_MESSAGES, Discord.Permissions.VOICE_USE_VAD, Discord.Permissions.GENERAL_CREATE_INSTANT_INVITE]}, function(e,headerRes) {
+                if (!e) createRole(i.fullName+" Member", i.serverID, 0x3167f8, true, false, {allow: [Discord.Permissions.TEXT_READ_MESSAGES, Discord.Permissions.TEXT_SEND_MESSAGES, Discord.Permissions.TEXT_READ_MESSAGE_HISTORY, Discord.Permissions.TEXT_ADD_REACTIONS, Discord.Permissions.VOICE_USE_VAD]}, function(e,memberRes) {
+                    if (!e) {/*
+                        createChannel(i.shortName+"_rules", "text", serverID);
+                        createChannel(i.shortName+"_news", "text", serverID);
+                        createChannel(i.shortName+"_clan_lobby", "text", serverID);
+                        createChannel(i.shortName+"_staff_lobby", "text", serverID);
+
+                        createChannel(i.fullName, "text", channelID);
+                        createChannel("---Public Lobby", "voice", serverID);
+                        createChannel("---Members Lobby", "voice", serverID);
+                        createChannel("____________________", "voice", serverID);*/
+                    }
+                });
+            });
+        }
+    }
+    if (created) {
+        sendMessage(channelID, "Okay, I'm creating the clan now. You won't see a confirmation message. After it appears to be done (should take several seconds), you should make sure that everything was set up correctly, especially channel positions and permissions.");
+    } else {
+        sendMessage(channelID, "That code didn't match any records, so either your confirmation code didn't match, or you never used `/clan` in the first place. It's also possible that `/clan` timed out, which happens after "+configurables.channelTimeout/1000+" seconds.");
     }
 }
 
@@ -763,35 +894,44 @@ bot.on("ready", function() {
     log("Logged in", 1);
     createIndex(configurables.server);
     fixChannelPositions(configurables.server);
-    setInterval(function() {
-        let modified = false;
-        for (member in bot.servers[configurables.server].members) {
-            let vcid = bot.servers[configurables.server].members[member].voice_channel_id;
-            if (vcid != null) {
-                awardXP(member, Math.floor(Math.random()*3+4), 10);
-                modified = true;
-                if (configurables.channelActivity[vcid]) {
-                    configurables.channelActivity[vcid].time = Date.now();
-                    if (configurables.channelActivity[vcid].members.indexOf(member) == -1) {
-                        configurables.channelActivity[vcid].members.push(member);
-                        editChannelPermissions(configurables.channelActivity[vcid].text, member, {allow: [Discord.Permissions.TEXT_READ_MESSAGES]});
+    if (!restarted) {
+        restarted = true;
+        sendMessage("176580265294954507", "Bot started");
+        setInterval(function() {
+            deleteExpiredClans();
+            // Keep voice channels alive and manage XP
+            let modified = false;
+            for (member in bot.servers[configurables.server].members) {
+                let vcid = bot.servers[configurables.server].members[member].voice_channel_id;
+                if (vcid != null) {
+                    awardXP(member, Math.floor(Math.random()*3+4), 10);
+                    modified = true;
+                    if (configurables.channelActivity[vcid]) {
+                        configurables.channelActivity[vcid].time = Date.now();
+                        if (configurables.channelActivity[vcid].members.indexOf(member) == -1) {
+                            configurables.channelActivity[vcid].members.push(member);
+                            editChannelPermissions(configurables.channelActivity[vcid].text, member, {allow: [Discord.Permissions.TEXT_READ_MESSAGES]});
+                        }
                     }
                 }
             }
-        }
-        if (modified) fs.writeFile("xpreloaded.txt", "let xp = "+JSON.stringify(xp), {encoding: "utf8"}, function() {});
-        for (let channelID in configurables.channelActivity) {
-            if ((Date.now() - configurables.channelActivity[channelID].time) > configurables.channelTimeout) {
-                log("Deleting channel "+JSON.stringify(bot.channels[channelID]), 2);
-                deleteChannel(channelID, function() {
-                    deleteChannel(configurables.channelActivity[channelID].text, function() {
-                        delete configurables.channelActivity[channelID];
+            // Write XP to a file
+            if (modified) fs.writeFile("xpreloaded.txt", "let xp = "+JSON.stringify(xp), {encoding: "utf8"}, function() {});
+            // Delete expired channels
+            for (let channelID in configurables.channelActivity) {
+                if ((Date.now() - configurables.channelActivity[channelID].time) > configurables.channelTimeout) {
+                    log("Deleting channel "+JSON.stringify(bot.channels[channelID]), 2);
+                    deleteChannel(channelID, function() {
+                        deleteChannel(configurables.channelActivity[channelID].text, function() {
+                            delete configurables.channelActivity[channelID];
+                        });
                     });
-                });
+                }
             }
-        }
-        saveConfigurables();
-    }, 5000);
+            // Write configurables to a file
+            saveConfigurables();
+        }, 5000); // Every 5 seconds
+    }
 });
 
 // When a message is sent
@@ -862,6 +1002,12 @@ bot.on("message", function(user, userID, channelID, message, event) {
             break;
         case "/changename":
             changeName(userID, channelID, event.d.mentions[0], message.split(" ").slice(2).join(" "));
+            break;
+        case "/clan":
+            createClan(userID, channelID, event.d.mentions[0], message.split(" ")[2], message.split(" ").slice(3).join(" "));
+            break;
+        case "/confirmclan":
+            confirmClan(userID, channelID, message.split(" ").slice(1).join(" "));
             break;
         }
     }
