@@ -343,8 +343,9 @@ function editChannelPermissions(channelID, groupID, permissions, attempts) {
             method: "GET",
         }, function(error, response, body) {
             if (error) {
-                if (failed == "") failed = error;
+                if (failed == "") failed = "Manual request error: "+error;
             } else {
+                log(typeof(JSON.parse(body).permission_overwrites), 0);
                 let combined = {allow: 0, deny: 0};
                 if (permissions.allow) for (let i of permissions.allow) combined.allow += Math.pow(2, i);
                 if (permissions.deny) for (let i of permissions.deny) combined.deny += Math.pow(2, i);
@@ -447,7 +448,12 @@ function saveConfigurables() {
 
 // Send a message made of an embed to a channel. Retries automatically if it fails.
 // The attempts option should not be specified when calling this function outside of this function.
-function sendEmbedMessage(channelID, title, message, type, attempts) {
+function sendEmbedMessage(channelID, title, message, type, timestamp, attempts) {
+    if (!timestamp) {
+        timestamp = undefined;
+    } else {
+        timestamp = new Date().toJSON();
+    }
     let fields = [];
     if (title == "multifield") {
         fields = message;
@@ -458,7 +464,8 @@ function sendEmbedMessage(channelID, title, message, type, attempts) {
         to: channelID,
         embed: {
             color: configurables.colourLookup[type] || type,
-            fields: fields
+            fields: fields,
+            timestamp: timestamp
         }
     }, function(err) {
         if (err) { // If an error occurred
@@ -470,7 +477,7 @@ function sendEmbedMessage(channelID, title, message, type, attempts) {
             } else {
                 toLog += "Will retry in "+configurables.retryTimeout+"ms.";
                 setTimeout(function() {
-                    sendEmbedMessage(channelID, title, message, type, attempts);
+                    sendEmbedMessage(channelID, title, message, type, timestamp, attempts);
                 }, configurables.retryTimeout);
             }
             log(toLog, 1);
@@ -820,6 +827,26 @@ function friendlyChannelCreation(name, type, userID, channelID) {
     });
 }
 
+function manageGroups(userID, channelID, group) {
+    let somethingChanged = false;
+    for (let gw = 0; gw < configurables.groupingWords.length; gw++) {
+        if (configurables.groupingWords[gw].names.indexOf(group) != -1 && !somethingChanged) {
+            let index = configurables.groupingWords[gw].users.indexOf(userID);
+            if (index != -1) {
+                configurables.groupingWords[gw].users.splice(index, 1);
+                sendEmbedMessage(channelID, "Groups modified", "You were removed from the group named **"+group+"**.", "success");
+            } else {
+                configurables.groupingWords[gw].users.push(userID);
+                sendEmbedMessage(channelID, "Groups modified", "You were added to the group named **"+group+"**.", "success");
+            }
+            somethingChanged = true;
+        }
+    }
+    if (!somethingChanged) {
+        sendEmbedMessage(channelID, "No groups modified", "I couldn't find any groups matching \""+group+"\".", "error");
+    }
+}
+
 function inviteToChannel(userID, channelID, mentions) {
     let vcid = bot.servers[bot.channels[channelID].guild_id].members[userID].voice_channel_id;
     if (mentions.length == 0) {
@@ -874,6 +901,16 @@ function rank(userID, channelID) {
                 ]
             }
         });
+    }
+}
+
+// Add a new item to the groups list
+function registerGroup(userID, channelID, names) {
+    if (configurables.botAdmins.indexOf(userID) != -1) {
+        configurables.groupingWords.push({names: names, users: [], lastUsed: Date.now()});
+        sendMessage(channelID, 'Added the linked keywords "'+names.join('", "')+'" to the list of groups.');
+    } else {
+        sendMessage(channelID, "You don't have permission to add keywords.");
     }
 }
 
@@ -1009,6 +1046,37 @@ bot.on("message", function(user, userID, channelID, message, event) {
         case "/confirmclan":
             confirmClan(userID, channelID, message.split(" ").slice(1).join(" "));
             break;
+        case "/group":
+        case "/groups":
+            manageGroups(userID, channelID, message.split(" ").slice(1).join(" "));
+            break;
+        case "/registergroup":
+            registerGroup(userID, channelID, message.split(" ").slice(1));
+            break;
+        }
+    } else if (configurables.groupingChannels.indexOf(channelID) != -1) {
+        let words = message.toLowerCase().replace(/[^ a-z0-9]/g, "").split(" ");
+        for (let w of words) {
+            for (let gw = 0; gw < configurables.groupingWords.length; gw++) {
+                if (configurables.groupingWords[gw].names.indexOf(w) != -1) {
+                    if (configurables.groupingWords[gw].lastUsed+configurables.groupingTimeout < Date.now()) {
+                        sendMessage(channelID, "The word **"+w+"** was found in your message and "+configurables.groupingWords[gw].users.length+" "+plural("user", configurables.groupingWords[gw].users.length)+" were notified.\nIf you want to receive notifications of messages containing **"+w+"**, just type `/group "+w+"`.");
+                        configurables.groupingWords[gw].lastUsed = Date.now();
+                        for (let u of configurables.groupingWords[gw].users) {
+                            sendEmbedMessage(u, "multifield", [
+                            {
+                                name: "New group request",
+                                value: "**"+userIDToNick(userID, bot.channels[channelID].guild_id)+"** said the word **"+w+"** in **#"+bot.channels[channelID].name+"**."
+                            },{
+                                name: "Disable notifications",
+                                value: "To stop being notified about "+w+", type the command `/group "+w+"` in a bot channel."
+                            }], 0x4C62FF, true);
+                        }
+                    } else {
+                        sendMessage(channelID, "I found the word **"+w+"** in your message, but it needs to cool down after its last use ("+Math.floor((configurables.groupingWords[gw].lastUsed+configurables.groupingTimeout-Date.now())/1000)+" seconds left).");
+                    }
+                }
+            }
         }
     }
     awardXP(userID, 1);

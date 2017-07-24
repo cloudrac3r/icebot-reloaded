@@ -53,6 +53,34 @@
     "maxAttempts": 3,
     "channelActivity": {
     },
+    "groupingChannels": [
+        "337478568453996544"
+    ],
+    "groupingWords": [
+        {
+            "names": [
+                "sortie",
+                "sorties"
+            ],
+            "users": [],
+            "lastUsed": 1500683034656
+        },
+        {
+            "names": [
+                "kuva"
+            ],
+            "users": [],
+            "lastUsed": 1500683074727
+        },
+        {
+            "names": [
+                "relic",
+                "relics"
+            ],
+            "users": [],
+            "lastUsed": 1500682615229
+        }
+    ],
     "roleHierarchy": {
         "312812741448433665": [
             "313476262633144320",
@@ -343,7 +371,8 @@
         "317224843034492928",
         "313798444680478720",
         "301407417298583563",
-        "326437828818894848"
+        "326437828818894848",
+        "337478568453996544"
     ],
     "needsReceptionistRole": "324050791059161089",
     "accessRequirements": {
@@ -366,5 +395,6 @@
             "313478838942171139"
         ]
     },
-    "clanWaitingList": []
+    "clanWaitingList": [],
+    "groupingTimeout": 120000
 }
