@@ -105,7 +105,7 @@ function matchingElementFromArray(array1, array2) {
 // Given a word and a number, returns the plural form of that word.
 function plural(word, number) {
     var plurals = {
-        is: "are", foot: "feet", person: "people", werewolf: "werewolves", wolf: "wolves", that: "those" // Add more irrlegular plurals here if you need them
+        is: "are", foot: "feet", person: "people", werewolf: "werewolves", wolf: "wolves", that: "those", was: "were" // Add more irrlegular plurals here if you need them
     };
     if (number != 1) {
         if (plurals[word.toLowerCase()] != undefined) {
@@ -222,34 +222,33 @@ function createRole(name, server, colour, hoist, mentionable, permissions, callb
         return;
     }
     if (!attempts) attempts = 0; // Set attempts if it was not set
-    let failed = false;
     bot.createRole(server, function(err, res) {
         if (err) {
-            failed = true;
+            con1(err);
         } else {
             bot.editRole({serverID: server, roleID: res.id, name: name, color: colour, hoist: hoist, permissions: permissions, mentionable: mentionable}, function(err2, res2) {
-                if (err2) {
-                    failed = true;
-                }
+                con1(err2, res.id);
             });
         }
-        if (failed) {
-            attempts++;
-            let toLog = "An error occurred while creating a role (attempt "+attempts+")!\nserverID: "+server+", name: "+name+"\nError: "+err+"\n";
-            // Retry (or not)
-            if (attempts >= configurables.maxAttempts) {
-                toLog += "Will not retry.";
-                if (callback) callback(true);
+        function con1(e, rID) {
+            if (e) {
+                attempts++;
+                let toLog = "An error occurred while creating a role (attempt "+attempts+")!\nserverID: "+server+", name: "+name+"\nError: "+e+"\n";
+                // Retry (or not)
+                if (attempts >= configurables.maxAttempts) {
+                    toLog += "Will not retry.";
+                    if (callback) callback(true);
+                } else {
+                    toLog += "Will retry in "+configurables.retryTimeout+"ms.";
+                    setTimeout(function() {
+                        createRole(name, server, colour, hoist, mentionable, permissions, callback, attempts);
+                    }, configurables.retryTimeout);
+                }
+                log(toLog, 1);
             } else {
-                toLog += "Will retry in "+configurables.retryTimeout+"ms.";
-                setTimeout(function() {
-                    createRole(name, server, colour, hoist, mentionable, permissions, callback, attempts);
-                }, configurables.retryTimeout);
+                log("Created a role: "+name, 2);
+                if (callback) callback(false, rID);
             }
-            log(toLog, 1);
-        } else {
-            log("Created a role: "+name, 2);
-            if (callback) callback(false);
         }
     });
 }
@@ -345,7 +344,6 @@ function editChannelPermissions(channelID, groupID, permissions, attempts) {
             if (error) {
                 if (failed == "") failed = "Manual request error: "+error;
             } else {
-                log(typeof(JSON.parse(body).permission_overwrites), 0);
                 let combined = {allow: 0, deny: 0};
                 if (permissions.allow) for (let i of permissions.allow) combined.allow += Math.pow(2, i);
                 if (permissions.deny) for (let i of permissions.deny) combined.deny += Math.pow(2, i);
@@ -664,14 +662,22 @@ function changeName(userID, channelID, targetID, nick) {
 // Prepares to create an entire clan
 function createClan(userID, channelID, owner, short, full) {
     deleteExpiredClans(userID);
+    // Check to make sure the required rank (Alliance Staff Access) is held
+    if (bot.servers[bot.channels[channelID].guild_id].members[userID].roles.indexOf("313818382564589569") == -1) {
+        sendEmbedMessage(channelID, "Failed to change nickname!", "You need the Alliance Staff Access role to be able to change nicknames.", "error");
+        return;
+    }
+    // Make sure all required information was provided
     for (let i = 0; i < configurables.clanWaitingList.length; i++) if (configurables.clanWaitingList[i].userID == userID) delete configurables.clanWaitingList[i];
     if (!full || !owner) {
         sendMessage(channelID, "Not enough information provided. Try `/clan @mention SHORT Full Clan Name`. Replace *SHORT* with a short name for the clan, e.g. *Crescent Moon Prime* → *CMP*, and *@mention* with a mention of the new Founding Warlord of the clan.");
         return;
     }
+    // Store stuff
     owner = owner.id;
-    let confirm = randomResult(configurables.confirmationStrings[0])+" "+randomResult(configurables.confirmationStrings[1])+" "+randomResult(configurables.confirmationStrings[2]);
-    configurables.clanWaitingList.push({userID: userID, confirmation: confirm, shortName: short, fullName: full, owner: owner, channelID: channelID, timestamp: Date.now()});
+    let confirm = randomResult(configurables.confirmationStrings[0])+" ­"+randomResult(configurables.confirmationStrings[1])+" ­"+randomResult(configurables.confirmationStrings[2]); // Zero-width spaces are used here!!!!
+    configurables.clanWaitingList.push({userID: userID, confirmation: confirm.replace(/­/g, ""), shortName: short, fullName: full, owner: owner, channelID: channelID, timestamp: Date.now()}); // Zero-width spaces are used here!!!!
+    // Send confirmation
     sendEmbedMessage(channelID, "multifield", [
         {
             name: "Details",
@@ -679,7 +685,7 @@ function createClan(userID, channelID, owner, short, full) {
             inline: true
         },{
             name: "Roles",
-            value: full.toUpperCase()+"\n"+full+" Member\nFormer "+full+" Member",
+            value: full.toUpperCase()+"\n"+full+" Member\nFormer "+short.toUpperCase()+" Member",
             inline: true
         },{
             name: "­", // Zero-width spaces are used here!!!!
@@ -703,31 +709,93 @@ function createClan(userID, channelID, owner, short, full) {
 
 // Confirms the clan creation and does the stuff
 function confirmClan(userID, channelID, confirmation) {
+    // Check for copy/paste (which is a bad thing)
+    if (confirmation.indexOf("­") != -1) { // Zero-width spaces are used here!!!!
+        sendMessage(channelID, "Don't copy and paste the confirmation code. Type it like you mean it!!");
+        return;
+    }
+    // Find the clan in the waiting list
     let created = false;
     for (let i of configurables.clanWaitingList) {
         if (i.userID == userID && i.confirmation == confirmation && !created) {
+            // Store stuff
             created = true;
             let serverID = bot.channels[i.channelID].guild_id;
-            createRole("Former "+i.fullName+" Member", i.serverID, 0x3292b3);
-            createRole(i.fullName.toUpperCase(), i.serverID, 0, true, true, {allow: [Discord.Permissions.TEXT_READ_MESSAGES, Discord.Permissions.TEXT_SEND_MESSAGES, Discord.Permissions.VOICE_USE_VAD, Discord.Permissions.GENERAL_CREATE_INSTANT_INVITE]}, function(e,headerRes) {
-                if (!e) createRole(i.fullName+" Member", i.serverID, 0x3167f8, true, false, {allow: [Discord.Permissions.TEXT_READ_MESSAGES, Discord.Permissions.TEXT_SEND_MESSAGES, Discord.Permissions.TEXT_READ_MESSAGE_HISTORY, Discord.Permissions.TEXT_ADD_REACTIONS, Discord.Permissions.VOICE_USE_VAD]}, function(e,memberRes) {
-                    if (!e) {/*
-                        createChannel(i.shortName+"_rules", "text", serverID);
-                        createChannel(i.shortName+"_news", "text", serverID);
-                        createChannel(i.shortName+"_clan_lobby", "text", serverID);
-                        createChannel(i.shortName+"_staff_lobby", "text", serverID);
-
-                        createChannel(i.fullName, "text", channelID);
-                        createChannel("---Public Lobby", "voice", serverID);
-                        createChannel("---Members Lobby", "voice", serverID);
-                        createChannel("____________________", "voice", serverID);*/
-                    }
-                });
-            });
+            let details = {
+                memberRoleID: undefined,
+                headerRoleID: undefined,
+                formerRoleID: undefined,
+                publicLobby: undefined,
+                membersLobby: undefined,
+            };
+            // Create roles
+            createRole("Former "+i.shortName.toUpperCase()+" Member", serverID, 0x3292b3, false, false, {}, function(e,r) { if (!e) {
+                details.formerRoleID = r;
+                createRole(i.fullName.toUpperCase(), serverID, 0, true, true, {allow: [Discord.Permissions.VOICE_USE_VAD, Discord.Permissions.GENERAL_CREATE_INSTANT_INVITE]}, function(e,r) { if (!e) {
+                    details.headerRoleID = r;
+                    createRole(i.fullName+" Member", serverID, 0x3167f8, true, false, {allow: [Discord.Permissions.TEXT_READ_MESSAGES, Discord.Permissions.TEXT_SEND_MESSAGES, Discord.Permissions.TEXT_READ_MESSAGE_HISTORY, Discord.Permissions.TEXT_ADD_REACTIONS, Discord.Permissions.VOICE_CONNECT, Discord.Permissions.VOICE_SPEAK, Discord.Permissions.VOICE_USE_VAD]}, function(e,r) { if (!e) {
+                        details.memberRoleID = r;
+                        // Give roles to clan owner
+                        setUserRole(i.owner, details.memberRoleID, serverID, 1);
+                        setUserRole(i.owner, details.headerRoleID, serverID, 1);
+                        setUserRole(i.owner, configurables.clanHierarchy["top"][0], serverID, 1); // Founding Warlord
+                        setUserRole(i.owner, "320678250311450627", serverID, 1); // Clan Staff Access
+                        // Create text channels and set permissions
+                        let groupsLeft = 2;
+                        createChannel(i.shortName+"_rules", "text", serverID, function(e,r) {
+                            editChannelPermissions(r, serverID, {deny: [Discord.Permissions.TEXT_READ_MESSAGES, Discord.Permissions.TEXT_SEND_MESSAGES], allow: [Discord.Permissions.TEXT_EMBED_LINKS, Discord.Permissions.TEXT_ATTACH_FILES]});
+                            editChannelPermissions(r, details.memberRoleID, {allow: [Discord.Permissions.TEXT_READ_MESSAGES]});
+                            editChannelPermissions(r, details.headerRoleID, {allow: [Discord.Permissions.TEXT_READ_MESSAGES, Discord.Permissions.TEXT_SEND_MESSAGES]});
+                            createChannel(i.shortName+"_news", "text", serverID, function(e,r) {
+                                editChannelPermissions(r, serverID, {deny: [Discord.Permissions.TEXT_READ_MESSAGES, Discord.Permissions.TEXT_SEND_MESSAGES], allow: [Discord.Permissions.TEXT_EMBED_LINKS, Discord.Permissions.TEXT_ATTACH_FILES, Discord.Permissions.TEXT_ADD_REACTIONS]});
+                                editChannelPermissions(r, details.memberRoleID, {allow: [Discord.Permissions.TEXT_READ_MESSAGES]});
+                                editChannelPermissions(r, details.headerRoleID, {allow: [Discord.Permissions.TEXT_READ_MESSAGES, Discord.Permissions.TEXT_SEND_MESSAGES, Discord.Permissions.TEXT_MENTION_EVERYONE]});
+                                createChannel(i.shortName+"_clan_lobby", "text", serverID, function(e,r) {
+                                editChannelPermissions(r, serverID, {deny: [Discord.Permissions.TEXT_READ_MESSAGES], allow: [Discord.Permissions.TEXT_EMBED_LINKS, Discord.Permissions.TEXT_ATTACH_FILES, Discord.Permissions.TEXT_ADD_REACTIONS]});
+                                    editChannelPermissions(r, details.memberRoleID, {allow: [Discord.Permissions.TEXT_READ_MESSAGES]});
+                                    editChannelPermissions(r, details.headerRoleID, {allow: [Discord.Permissions.TEXT_READ_MESSAGES, Discord.Permissions.GENERAL_CREATE_INSTANT_INVITE, Discord.Permissions.TEXT_MANAGE_MESSAGES]});
+                                    createChannel(i.shortName+"_staff_lobby", "text", serverID, function(e,r) {
+                                        editChannelPermissions(r, serverID, {deny: [Discord.Permissions.TEXT_READ_MESSAGES], allow: [Discord.Permissions.TEXT_EMBED_LINKS, Discord.Permissions.TEXT_ATTACH_FILES, Discord.Permissions.TEXT_ADD_REACTIONS]});
+                                        editChannelPermissions(r, details.headerRoleID, {allow: [Discord.Permissions.TEXT_READ_MESSAGES]});
+                                        groupsLeft--;
+                                        if (groupsLeft == 0) con1();
+                                    });
+                                });
+                            });
+                        });
+                        // Create voice channels and set permissions
+                        createChannel(i.fullName, "voice", serverID, function(e,r) {
+                            editChannelPermissions(r, serverID, {deny: [Discord.Permissions.VOICE_CONNECT]});
+                            editChannelPermissions(r, details.headerRoleID, {allow: [Discord.Permissions.VOICE_CONNECT]});
+                            createChannel("---Public Lobby", "voice", serverID, function(e,r) {
+                                details.publicLobby = r;
+                                editChannelPermissions(r, serverID, {deny: [Discord.Permissions.VOICE_CONNECT]});
+                                for (let g in configurables.publicAccess) editChannelPermissions(r, g, {allow: [Discord.Permissions.VOICE_CONNECT, Discord.Permissions.GENERAL_CREATE_INSTANT_INVITE]});
+                                createChannel("---Members Lobby", "voice", serverID, function(e,r) {
+                                    details.membersLobby = r;
+                                    editChannelPermissions(r, serverID, {deny: [Discord.Permissions.VOICE_CONNECT]});
+                                    editChannelPermissions(r, details.memberRoleID, {allow: [Discord.Permissions.VOICE_CONNECT]});
+                                    editChannelPermissions(r, details.headerRoleID, {allow: [Discord.Permissions.VOICE_CONNECT, Discord.Permissions.GENERAL_CREATE_INSTANT_INVITE, Discord.Permissions.VOICE_MUTE_MEMBERS, Discord.Permissions.VOICE_MOVE_MEMBERS]});
+                                    createChannel("____________________", "voice", serverID, function(e,r) {
+                                        editChannelPermissions(r, serverID, {deny: [Discord.Permissions.VOICE_CONNECT]});
+                                        groupsLeft--;
+                                        if (groupsLeft == 0) con1();
+                                    });
+                                });
+                            });
+                        });
+                        // Once all channels are created...
+                        function con1() {
+                            // It's done!
+                            sendMessage(channelID, "Okay, everything finished and all self-tests passed. Be sure to check things manually as well.");
+                        }
+                    }});
+                }});
+            }});
         }
     }
     if (created) {
-        sendMessage(channelID, "Okay, I'm creating the clan now. You won't see a confirmation message. After it appears to be done (should take several seconds), you should make sure that everything was set up correctly, especially channel positions and permissions.");
+        sendMessage(channelID, "Okay, I'm creating the clan now. If everything goes to plan, you'll eventually see a confirmation message in this channel. Even if it says it's okay, you should still make sure that everything was set up correctly, *especially channel permissions!*");
     } else {
         sendMessage(channelID, "That code didn't match any records, so either your confirmation code didn't match, or you never used `/clan` in the first place. It's also possible that `/clan` timed out, which happens after "+configurables.channelTimeout/1000+" seconds.");
     }
@@ -953,16 +1021,18 @@ bot.on("ready", function() {
                 }
             }
             // Write XP to a file
-            if (modified) fs.writeFile("xpreloaded.txt", "let xp = "+JSON.stringify(xp), {encoding: "utf8"}, function() {});
+            //if (modified) fs.writeFile("xpreloaded.txt", "let xp = "+JSON.stringify(xp), {encoding: "utf8"}, function() {});
             // Delete expired channels
             for (let channelID in configurables.channelActivity) {
                 if ((Date.now() - configurables.channelActivity[channelID].time) > configurables.channelTimeout) {
-                    log("Deleting channel "+JSON.stringify(bot.channels[channelID]), 2);
-                    deleteChannel(channelID, function() {
-                        deleteChannel(configurables.channelActivity[channelID].text, function() {
-                            delete configurables.channelActivity[channelID];
+                    if (bot.channels[channelID]) {
+                        log("Deleting channel "+JSON.stringify(bot.channels[channelID].name), 2);
+                        deleteChannel(channelID, function(e) {
+                            deleteChannel(configurables.channelActivity[channelID].text, function() {
+                                delete configurables.channelActivity[channelID];
+                            });
                         });
-                    });
+                    }
                 }
             }
             // Write configurables to a file
@@ -1060,17 +1130,19 @@ bot.on("message", function(user, userID, channelID, message, event) {
             for (let gw = 0; gw < configurables.groupingWords.length; gw++) {
                 if (configurables.groupingWords[gw].names.indexOf(w) != -1) {
                     if (configurables.groupingWords[gw].lastUsed+configurables.groupingTimeout < Date.now()) {
-                        sendMessage(channelID, "The word **"+w+"** was found in your message and "+configurables.groupingWords[gw].users.length+" "+plural("user", configurables.groupingWords[gw].users.length)+" were notified.\nIf you want to receive notifications of messages containing **"+w+"**, just type `/group "+w+"`.");
+                        sendMessage(channelID, "The word **"+w+"** was found in your message and "+configurables.groupingWords[gw].users.length+" "+plural("user", configurables.groupingWords[gw].users.length)+" "+plural("was", configurables.groupingWords[gw].users.length)+" notified.\nIf you want to receive notifications of messages containing **"+w+"**, just type `/group "+w+"`.");
                         configurables.groupingWords[gw].lastUsed = Date.now();
                         for (let u of configurables.groupingWords[gw].users) {
-                            sendEmbedMessage(u, "multifield", [
-                            {
-                                name: "New group request",
-                                value: "**"+userIDToNick(userID, bot.channels[channelID].guild_id)+"** said the word **"+w+"** in **#"+bot.channels[channelID].name+"**."
-                            },{
-                                name: "Disable notifications",
-                                value: "To stop being notified about "+w+", type the command `/group "+w+"` in a bot channel."
-                            }], 0x4C62FF, true);
+                            if (u != userID) {
+                                sendEmbedMessage(u, "multifield", [
+                                {
+                                    name: "New group request",
+                                    value: "**"+userIDToNick(userID, bot.channels[channelID].guild_id)+"** said the word **"+w+"** in **#"+bot.channels[channelID].name+"**."
+                                },{
+                                    name: "Disable notifications",
+                                    value: "To stop being notified about "+w+", type the command `/group "+w+"` in a bot channel."
+                                }], 0x4C62FF, true);
+                            }
                         }
                     } else {
                         sendMessage(channelID, "I found the word **"+w+"** in your message, but it needs to cool down after its last use ("+Math.floor((configurables.groupingWords[gw].lastUsed+configurables.groupingTimeout-Date.now())/1000)+" seconds left).");
